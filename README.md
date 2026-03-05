@@ -25,6 +25,7 @@ Core orchestration lives in one place (`AnalyticsAgentRuntime`) and depends on i
 - Snowflake integration:
   - Executes read-only SQL through an adapter.
   - SQL guard to enforce SELECT/WITH-only and row limits.
+  - Agent can inspect warehouse metadata (schemas/tables/columns) when relation names are unclear.
 - Conversation memory:
   - SQLite store for conversations/messages/profiles/repo config.
 - Agent profile abstraction (“souls”):
@@ -94,13 +95,51 @@ npm run dev -- sync-dbt --tenant acme
 npm run dev -- chat --tenant acme
 ```
 
+Optional model override (instead of `LLM_MODEL` from `.env`):
+
+```bash
+npm run dev -- chat --tenant acme --model openai/gpt-4o-mini
+```
+
 One-shot chat:
 
 ```bash
 npm run dev -- chat --tenant acme --message "How many orders did we have yesterday?"
 ```
 
-7. Run Slack server (Events API)
+Verbose chat/debug mode (prints planner attempts, SQL, tool calls, full tool outputs/errors, and timings):
+
+```bash
+npm run dev -- chat --tenant acme --verbose
+```
+
+When run in a TTY, chat output uses colors to distinguish answers, debug logs, and errors.
+
+You can also enable verbosity by default with:
+
+```bash
+AGENT_VERBOSE=true
+```
+
+7. Run E2E loop scenario (for agent-loop debugging + model comparison)
+
+Runs these 3 prompts in sequence in the same conversation:
+
+1) "How many users do we have in total?"  
+2) "How many were created last month?"  
+3) "From those, how many made a transaction since?"
+
+```bash
+npm run dev -- e2e-loop --tenant acme
+```
+
+Run against multiple models in one go:
+
+```bash
+npm run dev -- e2e-loop --tenant acme --models "openai/gpt-4o-mini,openai/gpt-4.1-mini" --runs 2
+```
+
+8. Run Slack server (Events API)
 
 ```bash
 npm run dev -- slack --tenant acme --profile default --port 3000
@@ -121,15 +160,26 @@ Then point your Slack app Event Subscriptions URL to:
   - `--tenant <id>`
 - `prod-smoke`
   - `--tenant <id>`
+  - `--model <provider/model>` (optional; defaults to `LLM_MODEL`)
+- `e2e-loop`
+  - `--tenant <id>`
+  - `--profile <name>` (default: `default`)
+  - `--model <provider/model>` (optional; single model override)
+  - `--models <m1,m2,...>` (optional; run the scenario for multiple models)
+  - `--runs <n>` (optional; default `1`)
+  - `--verbose` (optional; also prints full debug payload per turn)
 - `chat`
   - `--tenant <id>`
   - `--profile <name>` (default: `default`)
   - `--conversation <id>` (optional)
   - `--message "<text>"` (optional, non-interactive)
+  - `--verbose` (optional; prints debug payload and timings)
+  - `--model <provider/model>` (optional; defaults to `LLM_MODEL`)
 - `slack`
   - `--tenant <id>` (optional if `SLACK_DEFAULT_TENANT_ID` is set)
   - `--profile <name>` (default: `default`)
   - `--port <number>` (default: `SLACK_PORT` or `3000`)
+  - `--model <provider/model>` (optional; defaults to `LLM_MODEL`)
 
 ## What you were missing (important for production)
 

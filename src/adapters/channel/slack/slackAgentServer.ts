@@ -8,6 +8,7 @@ export interface SlackAgentServerOptions {
   port: number;
   defaultTenantId?: string;
   defaultProfileName?: string;
+  llmModel?: string;
   teamTenantMap?: Record<string, string>;
 }
 
@@ -106,7 +107,8 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
         {
           tenantId,
           profileName,
-          conversationId
+          conversationId,
+          llmModel: options.llmModel
         },
         input.text
       );

@@ -20,30 +20,40 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       throw new Error("LLM_API_KEY is not configured.");
     }
 
-    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-        ...this.extraHeaders
-      },
-      body: JSON.stringify({
-        model: input.model,
-        messages: input.messages,
-        temperature: input.temperature ?? 0.2
-      })
-    });
+    const endpoint = `${this.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+          ...this.extraHeaders
+        },
+        body: JSON.stringify({
+          model: input.model,
+          messages: input.messages,
+          temperature: input.temperature ?? 0.2
+        })
+      });
 
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`LLM request failed (${response.status}): ${body}`);
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`LLM request failed (${response.status}): ${body}`);
+      }
+
+      const data = (await response.json()) as ChatCompletionResponse;
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (text) {
+        return text;
+      }
+
+      if (attempt === 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 300);
+        });
+      }
     }
 
-    const data = (await response.json()) as ChatCompletionResponse;
-    const text = data.choices?.[0]?.message?.content?.trim();
-    if (!text) {
-      throw new Error("LLM returned empty response.");
-    }
-    return text;
+    throw new Error("LLM returned empty response.");
   }
 }

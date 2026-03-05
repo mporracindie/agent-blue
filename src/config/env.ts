@@ -31,6 +31,7 @@ export const env = {
   slackDefaultTenantId: process.env.SLACK_DEFAULT_TENANT_ID ?? "",
   slackDefaultProfileName: process.env.SLACK_DEFAULT_PROFILE_NAME ?? "default",
   slackTeamTenantMapRaw: process.env.SLACK_TEAM_TENANT_MAP ?? "",
+  verboseMode: process.env.AGENT_VERBOSE === "1" || process.env.AGENT_VERBOSE?.toLowerCase() === "true",
   require(name: string): string {
     return required(name);
   }

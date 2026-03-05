@@ -34,6 +34,7 @@ export interface AgentContext {
   tenantId: string;
   profileName: string;
   conversationId: string;
+  llmModel?: string;
 }
 
 export interface AgentResponse {

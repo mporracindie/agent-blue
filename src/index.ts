@@ -8,14 +8,161 @@ import { createId } from "./utils/id.js";
 import { getStringArg, parseArgs } from "./utils/args.js";
 import { env } from "./config/env.js";
 
+const canUseAnsi = Boolean(output.isTTY) && process.env.NO_COLOR !== "1";
+
+function paint(text: string, code: number): string {
+  if (!canUseAnsi) {
+    return text;
+  }
+  return `\u001b[${code}m${text}\u001b[0m`;
+}
+
+function infoLabel(label: string): string {
+  return paint(label, 36);
+}
+
+function successText(text: string): string {
+  return paint(text, 32);
+}
+
+function errorText(text: string): string {
+  return paint(text, 31);
+}
+
+function warnText(text: string): string {
+  return paint(text, 33);
+}
+
+function printVerboseDebug(debug: Record<string, unknown> | undefined): void {
+  if (!debug) {
+    output.write(`${infoLabel("[debug]")} no debug payload\n`);
+    return;
+  }
+
+  const plan = debug.plan as Record<string, unknown> | undefined;
+  if (plan?.action) {
+    output.write(`${infoLabel("[debug]")} planner.action=${String(plan.action)}\n`);
+  }
+  const plannerAttempts = debug.plannerAttempts as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(plannerAttempts) && plannerAttempts.length > 0) {
+    output.write(`${infoLabel("[debug]")} planner.attempts=${plannerAttempts.length}\n`);
+  }
+
+  const sql = debug.sql;
+  if (typeof sql === "string" && sql.trim().length > 0) {
+    output.write(`${infoLabel("[debug]")} sql:\n${paint(sql, 37)}\n`);
+  }
+
+  const toolCalls = debug.toolCalls as
+    | Array<{
+        tool?: string;
+        input?: Record<string, unknown>;
+        status?: string;
+        durationMs?: number;
+        outputSummary?: Record<string, unknown>;
+        output?: unknown;
+        error?: string;
+      }>
+    | undefined;
+  if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+    output.write(`${infoLabel("[debug]")} tool calls:\n`);
+    for (const call of toolCalls) {
+      const status =
+        call.status === "ok"
+          ? successText(`status=${call.status ?? "unknown"}`)
+          : call.status === "error"
+            ? errorText(`status=${call.status ?? "unknown"}`)
+            : warnText(`status=${call.status ?? "unknown"}`);
+      output.write(
+        `  - ${paint(call.tool ?? "unknown", 35)} ${status} durationMs=${call.durationMs ?? -1}\n`
+      );
+      if (call.input) {
+        output.write(`    input=${JSON.stringify(call.input)}\n`);
+      }
+      if (call.outputSummary) {
+        output.write(`    output=${JSON.stringify(call.outputSummary)}\n`);
+      }
+      if (call.output) {
+        output.write(`    output_full=${JSON.stringify(call.output)}\n`);
+      }
+      if (call.error) {
+        output.write(`    error=${call.error}\n`);
+      }
+    }
+  }
+
+  const timings = debug.timings as Record<string, unknown> | undefined;
+  if (timings) {
+    output.write(`${infoLabel("[debug]")} timings=${JSON.stringify(timings)}\n`);
+  }
+}
+
+const e2eQuestions = [
+  "How many users do we have in total?",
+  "How many were created last month?",
+  "From those, how many made a transaction since?"
+];
+
+interface E2eTurnMetrics {
+  plannerAttempts: number;
+  totalMs: number | null;
+  snowflakeOk: number;
+  snowflakeErrors: number;
+  fallback: boolean;
+}
+
+function parseE2eTurnMetrics(text: string, debug: Record<string, unknown> | undefined): E2eTurnMetrics {
+  const plannerAttemptsRaw = debug?.plannerAttempts;
+  const plannerAttempts = Array.isArray(plannerAttemptsRaw) ? plannerAttemptsRaw.length : 0;
+
+  const timingsRaw = debug?.timings as Record<string, unknown> | undefined;
+  const totalMsValue = timingsRaw?.totalMs;
+  const totalMs = typeof totalMsValue === "number" ? totalMsValue : null;
+
+  const toolCallsRaw = debug?.toolCalls;
+  const toolCalls = Array.isArray(toolCallsRaw) ? toolCallsRaw : [];
+  let snowflakeOk = 0;
+  let snowflakeErrors = 0;
+  for (const call of toolCalls) {
+    const entry = call as { tool?: unknown; status?: unknown };
+    if (entry.tool !== "snowflake.query") {
+      continue;
+    }
+    if (entry.status === "ok") {
+      snowflakeOk += 1;
+    } else if (entry.status === "error") {
+      snowflakeErrors += 1;
+    }
+  }
+
+  return {
+    plannerAttempts,
+    totalMs,
+    snowflakeOk,
+    snowflakeErrors,
+    fallback: text.includes("I could not reach a reliable final answer")
+  };
+}
+
+function parseCsvArg(value: string | boolean | undefined): string[] {
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 function usage(): string {
   return [
     "Usage:",
     "  npm run dev -- init --tenant <id> --repo-url <git@...> [--dbt-subpath models] [--force]",
     "  npm run dev -- sync-dbt --tenant <id>",
-    "  npm run dev -- prod-smoke --tenant <id>",
-    "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"]",
-    "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000]"
+    "  npm run dev -- e2e-loop --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--runs 1] [--verbose]",
+    "  npm run dev -- prod-smoke --tenant <id> [--model <provider/model>]",
+    "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"] [--verbose] [--model <provider/model>]",
+    "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000] [--model <provider/model>]"
   ].join("\n");
 }
 
@@ -60,15 +207,27 @@ async function run(): Promise<void> {
     const profileName = getStringArg(args, "profile", "default");
     const conversationId = getStringArg(args, "conversation", createId("conv"));
     const oneShotMessage = typeof args.message === "string" ? args.message : null;
+    const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
+    const verbose = args.verbose === true || env.verboseMode;
 
     if (oneShotMessage) {
-      const response = await runtime.respond({ tenantId, profileName, conversationId }, oneShotMessage);
-      output.write(`${response.text}\n`);
+      const response = await runtime.respond({ tenantId, profileName, conversationId, llmModel }, oneShotMessage);
+      if (verbose) {
+        output.write("\n");
+        printVerboseDebug(response.debug);
+        output.write("\n");
+      }
+      output.write(`${successText(response.text)}\n`);
       return;
     }
 
-    output.write(`Chat started. tenant=${tenantId} profile=${profileName} conversation=${conversationId}\n`);
-    output.write('Type "exit" to quit.\n');
+    output.write(
+      `${infoLabel("Chat started.")} tenant=${tenantId} profile=${profileName} conversation=${conversationId}\n`
+    );
+    if (verbose) {
+      output.write(`${infoLabel("Verbose mode enabled.")}\n`);
+    }
+    output.write(`${infoLabel('Type "exit" to quit.')}\n`);
 
     const rl = readline.createInterface({ input, output });
     while (true) {
@@ -80,18 +239,109 @@ async function run(): Promise<void> {
         break;
       }
       try {
-        const response = await runtime.respond({ tenantId, profileName, conversationId }, message);
-        output.write(`\n${response.text}\n\n`);
+        const response = await runtime.respond({ tenantId, profileName, conversationId, llmModel }, message);
+        if (verbose) {
+          output.write("\n");
+          printVerboseDebug(response.debug);
+          output.write("\n");
+        }
+        output.write(`${successText(response.text)}\n\n`);
       } catch (error) {
-        output.write(`\nError: ${(error as Error).message}\n\n`);
+        output.write(`\n${errorText(`Error: ${(error as Error).message}`)}\n\n`);
       }
     }
     rl.close();
     return;
   }
 
+  if (command === "e2e-loop") {
+    const runtime = buildRuntime(store);
+    const tenantId = getStringArg(args, "tenant");
+    const profileName = getStringArg(args, "profile", "default");
+    const verbose = args.verbose === true || env.verboseMode;
+    const singleModel = typeof args.model === "string" ? args.model.trim() : "";
+    const modelsFromCsv = parseCsvArg(args.models);
+    const models =
+      modelsFromCsv.length > 0
+        ? modelsFromCsv
+        : singleModel.length > 0
+          ? [singleModel]
+          : [env.llmModel];
+    const runsRaw = typeof args.runs === "string" ? Number.parseInt(args.runs, 10) : 1;
+    const runs = Number.isFinite(runsRaw) && runsRaw > 0 ? runsRaw : 1;
+
+    output.write(
+      `${infoLabel("E2E loop started.")} tenant=${tenantId} profile=${profileName} runs=${runs} models=${models.join(", ")}\n`
+    );
+
+    for (const llmModel of models) {
+      output.write(`\n${paint(`=== Model: ${llmModel} ===`, 35)}\n`);
+      const modelMetrics: E2eTurnMetrics[] = [];
+      for (let runIndex = 1; runIndex <= runs; runIndex += 1) {
+        const conversationId = createId("e2e");
+        output.write(`${infoLabel(`[run ${runIndex}/${runs}]`)} conversation=${conversationId}\n`);
+
+        for (let questionIndex = 0; questionIndex < e2eQuestions.length; questionIndex += 1) {
+          const question = e2eQuestions[questionIndex];
+          output.write(`${warnText(`Q${questionIndex + 1}:`)} ${question}\n`);
+          try {
+            const response = await runtime.respond(
+              { tenantId, profileName, conversationId, llmModel },
+              question
+            );
+            const metrics = parseE2eTurnMetrics(response.text, response.debug);
+            modelMetrics.push(metrics);
+
+            output.write(`${successText("A:")} ${response.text}\n`);
+            output.write(
+              `${infoLabel("[metrics]")} attempts=${metrics.plannerAttempts} totalMs=${
+                metrics.totalMs ?? "n/a"
+              } snowflake.ok=${metrics.snowflakeOk} snowflake.error=${metrics.snowflakeErrors} fallback=${metrics.fallback}\n`
+            );
+            if (verbose) {
+              printVerboseDebug(response.debug);
+            }
+            output.write("\n");
+          } catch (error) {
+            output.write(`${errorText(`Error: ${(error as Error).message}`)}\n\n`);
+            modelMetrics.push({
+              plannerAttempts: 0,
+              totalMs: null,
+              snowflakeOk: 0,
+              snowflakeErrors: 0,
+              fallback: true
+            });
+          }
+        }
+      }
+
+      const totalTurns = modelMetrics.length;
+      const fallbackTurns = modelMetrics.filter((metric) => metric.fallback).length;
+      const avgAttempts =
+        totalTurns === 0
+          ? 0
+          : modelMetrics.reduce((acc, metric) => acc + metric.plannerAttempts, 0) / totalTurns;
+      const avgTotalMs =
+        totalTurns === 0
+          ? 0
+          : modelMetrics.reduce((acc, metric) => acc + (metric.totalMs ?? 0), 0) / totalTurns;
+      const totalSnowflakeOk = modelMetrics.reduce((acc, metric) => acc + metric.snowflakeOk, 0);
+      const totalSnowflakeErrors = modelMetrics.reduce((acc, metric) => acc + metric.snowflakeErrors, 0);
+
+      output.write(`${paint("Model summary", 36)}\n`);
+      output.write(`  - turns=${totalTurns}\n`);
+      output.write(`  - fallbackTurns=${fallbackTurns}\n`);
+      output.write(`  - avgPlannerAttempts=${avgAttempts.toFixed(2)}\n`);
+      output.write(`  - avgTotalMs=${Math.round(avgTotalMs)}\n`);
+      output.write(`  - snowflakeOk=${totalSnowflakeOk}\n`);
+      output.write(`  - snowflakeErrors=${totalSnowflakeErrors}\n`);
+    }
+    return;
+  }
+
   if (command === "prod-smoke") {
     const tenantId = getStringArg(args, "tenant");
+    const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
     const dbt = new GitDbtRepositoryService(store);
     const llm = buildLlmProvider();
     const warehouse = buildSnowflakeWarehouse();
@@ -100,7 +350,7 @@ async function run(): Promise<void> {
 
     output.write("1/3 LLM connectivity...\n");
     const llmResult = await llm.generateText({
-      model: env.llmModel,
+      model: llmModel,
       temperature: 0,
       messages: [
         { role: "system", content: "Return only the word OK." },
@@ -129,6 +379,7 @@ async function run(): Promise<void> {
       (typeof args.tenant === "string" ? args.tenant : undefined) || env.slackDefaultTenantId || undefined;
     const defaultProfileName =
       (typeof args.profile === "string" ? args.profile : undefined) || env.slackDefaultProfileName || "default";
+    const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
     const port = typeof args.port === "string" ? Number.parseInt(args.port, 10) : env.slackPort;
     const teamTenantMap = parseSlackTeamTenantMap(env.slackTeamTenantMapRaw);
 
@@ -139,6 +390,7 @@ async function run(): Promise<void> {
       port: Number.isFinite(port) ? port : 3000,
       defaultTenantId,
       defaultProfileName,
+      llmModel,
       teamTenantMap
     });
     return;
