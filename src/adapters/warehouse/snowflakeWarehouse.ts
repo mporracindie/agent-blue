@@ -9,6 +9,7 @@ export interface SnowflakeConfig {
   database: string;
   schema: string;
   role?: string;
+  logLevel?: snowflake.LogLevel;
   auth:
     | {
         type: "password";
@@ -26,6 +27,11 @@ export class SnowflakeWarehouseAdapter implements WarehouseAdapter {
   private connected = false;
 
   constructor(config: SnowflakeConfig) {
+    // Silence SDK connection chatter by default unless explicitly enabled.
+    snowflake.configure({
+      logLevel: config.logLevel ?? "OFF"
+    });
+
     const options = {
       account: config.account,
       username: config.username,

@@ -25,6 +25,7 @@ export const env = {
   snowflakeDatabase: process.env.SNOWFLAKE_DATABASE ?? "",
   snowflakeSchema: process.env.SNOWFLAKE_SCHEMA ?? "",
   snowflakeRole: process.env.SNOWFLAKE_ROLE ?? "",
+  snowflakeSdkLogLevel: (process.env.SNOWFLAKE_SDK_LOG_LEVEL ?? "OFF").toUpperCase(),
   slackBotToken: process.env.SLACK_BOT_TOKEN ?? "",
   slackSigningSecret: process.env.SLACK_SIGNING_SECRET ?? "",
   slackPort: Number.parseInt(process.env.SLACK_PORT ?? "3000", 10),

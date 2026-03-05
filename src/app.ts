@@ -46,6 +46,7 @@ export function buildSnowflakeConfig(): SnowflakeConfig {
       database: env.snowflakeDatabase,
       schema: env.snowflakeSchema,
       role: env.snowflakeRole || undefined,
+      logLevel: env.snowflakeSdkLogLevel as SnowflakeConfig["logLevel"],
       auth: {
         type: "keypair",
         privateKeyPath: env.snowflakePrivateKeyPath,
@@ -61,6 +62,7 @@ export function buildSnowflakeConfig(): SnowflakeConfig {
     database: env.snowflakeDatabase,
     schema: env.snowflakeSchema,
     role: env.snowflakeRole || undefined,
+    logLevel: env.snowflakeSdkLogLevel as SnowflakeConfig["logLevel"],
     auth: {
       type: "password",
       password: env.snowflakePassword
