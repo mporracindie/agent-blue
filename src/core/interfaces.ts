@@ -64,6 +64,19 @@ export interface DbtRepositoryService {
   getModelSql(tenantId: string, modelName: string, dbtSubpath?: string): Promise<string | null>;
 }
 
+export type SlackTenantMappingRule =
+  | "channel"
+  | "shared_team"
+  | "user"
+  | "team"
+  | "owner_default"
+  | "unmapped";
+
+export interface SlackTenantResolution {
+  tenantId: string;
+  rule: SlackTenantMappingRule;
+}
+
 export interface ConversationStore {
   init(): void;
   createConversation(context: AgentContext): void;
@@ -84,6 +97,88 @@ export interface ConversationStore {
     deployKeyPath: string;
     localPath: string;
   } | null;
+
+  getSlackChannelTenant(channelId: string): string | null;
+  upsertSlackChannelTenant(channelId: string, tenantId: string, source?: string): void;
+  getSlackUserTenant(userId: string): string | null;
+  upsertSlackUserTenant(userId: string, tenantId: string): void;
+  getSlackSharedTeamTenant(sharedTeamId: string): string | null;
+  upsertSlackSharedTeamTenant(sharedTeamId: string, tenantId: string): void;
+  listSlackChannelMappings(): Array<{ channelId: string; tenantId: string; source: string; updatedAt: string }>;
+  listSlackUserMappings(): Array<{ userId: string; tenantId: string; updatedAt: string }>;
+  listSlackSharedTeamMappings(): Array<{ sharedTeamId: string; tenantId: string; updatedAt: string }>;
+  logSlackTenantRoutingAudit?(input: {
+    messageTs: string;
+    channelId: string;
+    userId: string | null;
+    resolvedTenant: string;
+    ruleUsed: string;
+  }): void;
+
+  // Admin operations
+  listTenants(): Array<{
+    tenantId: string;
+    repoUrl: string;
+    dbtSubpath: string;
+    deployKeyPath: string;
+    localPath: string;
+    updatedAt: string;
+  }>;
+  deleteTenant(tenantId: string): void;
+  deleteSlackChannelMapping(channelId: string): void;
+  deleteSlackUserMapping(userId: string): void;
+  deleteSlackSharedTeamMapping(sharedTeamId: string): void;
+  getGuardrails(): AdminGuardrails | null;
+  upsertGuardrails(input: AdminGuardrails): void;
+  getTenantCredentialsRef(tenantId: string): TenantCredentialsRef | null;
+  upsertTenantCredentialsRef(input: TenantCredentialsRef): void;
+  getTenantWarehouseConfig(tenantId: string): TenantWarehouseConfig | null;
+  upsertTenantWarehouseConfig(input: Omit<TenantWarehouseConfig, "updatedAt">): void;
+}
+
+export interface AdminGuardrails {
+  defaultTenantId?: string;
+  ownerTeamIds: string[];
+  ownerEnterpriseIds: string[];
+  strictTenantRouting: boolean;
+  teamTenantMap?: Record<string, string>;
+}
+
+export interface TenantCredentialsRef {
+  tenantId: string;
+  deployKeyPath?: string;
+  warehouseMetadata?: { provider?: string; lastRotated?: string };
+}
+
+export type TenantWarehouseProvider = "snowflake" | "bigquery";
+
+export interface TenantSnowflakeConfig {
+  account: string;
+  username: string;
+  warehouse: string;
+  database: string;
+  schema: string;
+  role?: string;
+  authType: "password" | "keypair";
+  /** For keypair: path to private key file */
+  privateKeyPath?: string;
+  /** For password: env var name to read password from (e.g. TENANT_X_SNOWFLAKE_PASSWORD) */
+  passwordEnvVar?: string;
+}
+
+export interface TenantBigQueryConfig {
+  projectId: string;
+  dataset?: string;
+  /** Path to service account JSON */
+  credentialsPath?: string;
+}
+
+export interface TenantWarehouseConfig {
+  tenantId: string;
+  provider: TenantWarehouseProvider;
+  snowflake?: TenantSnowflakeConfig;
+  bigquery?: TenantBigQueryConfig;
+  updatedAt: string;
 }
 
 export interface ChannelAdapter {

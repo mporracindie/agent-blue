@@ -127,15 +127,21 @@ function inferSchemaHintFromModelPath(relativePath: string, fallbackSchema: stri
   return fallbackSchema || "PUBLIC";
 }
 
+export type WarehouseResolver = WarehouseAdapter | ((tenantId: string) => WarehouseAdapter);
+
 export class AnalyticsAgentRuntime {
   constructor(
     private readonly llm: LlmProvider,
-    private readonly warehouse: WarehouseAdapter,
+    private readonly warehouse: WarehouseResolver,
     private readonly chartTool: ChartTool,
     private readonly dbtRepo: DbtRepositoryService,
     private readonly store: ConversationStore,
     private readonly sqlGuard: SqlGuard
   ) {}
+
+  private resolveWarehouse(tenantId: string): WarehouseAdapter {
+    return typeof this.warehouse === "function" ? this.warehouse(tenantId) : this.warehouse;
+  }
 
   async respond(context: AgentContext, userText: string): Promise<AgentResponse> {
     const startedAt = Date.now();
@@ -201,8 +207,12 @@ export class AnalyticsAgentRuntime {
     timings.profileMs = Date.now() - startedAt;
     const history = this.store.getMessages(context.conversationId, 12);
     const tenantRepo = this.store.getTenantRepo(context.tenantId);
-    const snowflakeDatabase = process.env.SNOWFLAKE_DATABASE?.trim() ?? "";
-    const snowflakeSchema = process.env.SNOWFLAKE_SCHEMA?.trim() ?? "";
+    const tenantWhConfig = this.store.getTenantWarehouseConfig(context.tenantId);
+    const snowflakeDatabase =
+      tenantWhConfig?.snowflake?.database?.trim() ?? process.env.SNOWFLAKE_DATABASE?.trim() ?? "";
+    const snowflakeSchema =
+      tenantWhConfig?.snowflake?.schema?.trim() ?? process.env.SNOWFLAKE_SCHEMA?.trim() ?? "";
+    const warehouse = this.resolveWarehouse(context.tenantId);
     const llmModel = context.llmModel?.trim() || process.env.LLM_MODEL || "openai/gpt-4o-mini";
     const now = new Date();
     const currentDateIso = now.toISOString();
@@ -442,7 +452,7 @@ export class AnalyticsAgentRuntime {
           const metadataResult = await runTool(
             "snowflake.lookupMetadata",
             { ...parsedLookup.data, sql: metadataSql },
-            async () => this.warehouse.query(metadataSql),
+            async () => warehouse.query(metadataSql),
             (result) => ({ rowCount: result.rowCount, columns: result.columns }),
             (result) => ({
               columns: result.columns,
@@ -512,7 +522,7 @@ export class AnalyticsAgentRuntime {
             runTool(
               "snowflake.query",
               { sql: normalizedSql },
-              async () => this.warehouse.query(normalizedSql),
+              async () => warehouse.query(normalizedSql),
               (result) => ({ rowCount: result.rowCount, columns: result.columns }),
               (result) => ({
                 columns: result.columns,

@@ -78,6 +78,13 @@ Slack server requires:
 - one of:
   - `SLACK_DEFAULT_TENANT_ID` (single-tenant workspace), or
   - `SLACK_TEAM_TENANT_MAP` (JSON map for multi-workspace, e.g. `{"T123":"acme"}`)
+  - channel/user/shared-team mappings via `slack-map-channel`, `slack-map-user`, `slack-map-shared-team`
+
+For multi-tenant shared channels (one bot across many orgs):
+
+- `SLACK_OWNER_TEAM_IDS` (comma list of workspace IDs for owner org; only owner can use default tenant)
+- `SLACK_OWNER_ENTERPRISE_IDS` (comma list of enterprise IDs for org grid)
+- `SLACK_STRICT_TENANT_ROUTING=false` (set to `true` to require explicit mappings for non-owner contexts)
 
 3. Initialize tenant + repo (creates keys and stores config)
 
@@ -184,6 +191,49 @@ Then point your Slack app Event Subscriptions URL to:
   - `--profile <name>` (default: `default`)
   - `--port <number>` (default: `SLACK_PORT` or `3000`)
   - `--model <provider/model>` (optional; defaults to `LLM_MODEL`)
+- `slack-map-channel` (map shared channel to tenant)
+  - `--channel <C...>` (Slack channel ID)
+  - `--tenant <id>`
+- `slack-map-user` (map user to tenant for DMs)
+  - `--user <U...>` (Slack user ID)
+  - `--tenant <id>`
+- `slack-map-shared-team` (map shared workspace/org to tenant)
+  - `--team <T...>` (Slack team ID from shared channel)
+  - `--tenant <id>`
+- `slack-map-list` (list all channel/user/shared-team mappings)
+- `slack-map-validate` (check that all mapped tenants have dbt repos configured)
+- `admin-ui` (admin-only web UI for tenants, Slack mappings, guardrails, credential refs)
+  - `--port <number>` (default: `ADMIN_PORT` or `3100`)
+
+## Admin UI
+
+An admin-only web UI lets you manage tenants, Slack mappings, guardrails, and credential references without using the CLI.
+
+1. Start the admin server:
+
+```bash
+npm run admin:ui
+# or: npm run dev -- admin-ui --port 3100
+```
+
+2. Open `http://localhost:3100/admin` in a browser.
+3. Use the tabs to:
+   - **New Tenant Wizard**: Step-by-step onboarding for a new tenant. Complete each step in order: (1) tenant basics + init, (2) verify repo access, (3) configure per-tenant warehouse (Snowflake), (4) test warehouse connectivity, (5) add Slack mappings, (6) final validation. Per-tenant warehouse config overrides env when present.
+   - **Tenants**: Create, edit, delete tenants and their dbt repo config.
+   - **Slack Mappings**: Add/remove channel, user, and shared-team mappings to tenants.
+   - **Guardrails**: Configure owner team/enterprise IDs, strict tenant routing, default tenant, and team→tenant map. Persisted guardrails override env vars when the Slack server starts.
+   - **Credentials**: View credential reference metadata (paths and warehouse metadata only; no raw secrets).
+
+The admin server runs on a separate port from the Slack server. It has no authentication—do not expose it publicly without TLS and proper access control (e.g. firewall, VPN).
+
+### New Tenant Wizard flow
+
+1. **Tenant basics**: Enter tenant ID, repo URL, dbt subpath, warehouse provider. Click "Initialize tenant" to create keys and repo config. Copy the public key and add it as a GitHub Deploy Key (read-only).
+2. **Verify repo**: Click "Verify repo" to run `sync-dbt` and confirm access.
+3. **Configure warehouse**: Enter Snowflake connection fields (account, username, warehouse, database, schema, role). For keypair auth, set private key path. For password auth, set the env var name (e.g. `SNOWFLAKE_PASSWORD` or a tenant-specific var like `TENANT_ACME_SNOWFLAKE_PASSWORD`).
+4. **Test warehouse**: Click "Test connectivity" to run a lightweight query.
+5. **Slack mappings**: Add channel IDs, user IDs, and/or shared team IDs. Click "Save Slack mappings".
+6. **Final validation**: Click "Run final checks" to verify repo, warehouse, and Slack mappings. Copy the launch command when ready.
 
 ## What you were missing (important for production)
 

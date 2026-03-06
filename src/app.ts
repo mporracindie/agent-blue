@@ -7,6 +7,7 @@ import { SnowflakeConfig, SnowflakeWarehouseAdapter } from "./adapters/warehouse
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
 import { SqlGuard } from "./core/sqlGuard.js";
 import { AnalyticsAgentRuntime } from "./core/agentRuntime.js";
+import type { TenantWarehouseConfig, WarehouseAdapter } from "./core/interfaces.js";
 
 export function buildStore(): SqliteConversationStore {
   const dbPath = path.join(env.appDataDir, "agent.db");
@@ -17,7 +18,19 @@ export function buildStore(): SqliteConversationStore {
 
 export function buildRuntime(store: SqliteConversationStore): AnalyticsAgentRuntime {
   const llm = buildLlmProvider();
-  const warehouse = buildSnowflakeWarehouse();
+  let defaultWarehouse: WarehouseAdapter | null = null;
+  const warehouseResolver = (tenantId: string) => {
+    const config = store.getTenantWarehouseConfig(tenantId);
+    if (config) {
+      return buildWarehouseFromTenantConfig(config);
+    }
+    // Lazily build fallback warehouse to avoid startup failure when global env
+    // is intentionally unset and tenant-specific warehouse config is used.
+    if (!defaultWarehouse) {
+      defaultWarehouse = buildSnowflakeWarehouse();
+    }
+    return defaultWarehouse;
+  };
   const chartTool = new ChartJsTool();
   const dbtRepo = new GitDbtRepositoryService(store);
   const sqlGuard = new SqlGuard({
@@ -26,7 +39,7 @@ export function buildRuntime(store: SqliteConversationStore): AnalyticsAgentRunt
     maxLimit: 2000
   });
 
-  return new AnalyticsAgentRuntime(llm, warehouse, chartTool, dbtRepo, store, sqlGuard);
+  return new AnalyticsAgentRuntime(llm, warehouseResolver, chartTool, dbtRepo, store, sqlGuard);
 }
 
 export function buildLlmProvider(): OpenAiCompatibleProvider {
@@ -74,4 +87,45 @@ export function buildSnowflakeConfig(): SnowflakeConfig {
 
 export function buildSnowflakeWarehouse(): SnowflakeWarehouseAdapter {
   return new SnowflakeWarehouseAdapter(buildSnowflakeConfig());
+}
+
+export function buildWarehouseFromTenantConfig(config: TenantWarehouseConfig): WarehouseAdapter {
+  if (config.provider === "bigquery") {
+    throw new Error("BigQuery warehouse adapter is not implemented yet.");
+  }
+  const sf = config.snowflake;
+  if (!sf) {
+    throw new Error("Snowflake config missing for tenant.");
+  }
+  let auth: SnowflakeConfig["auth"];
+  if (sf.authType === "keypair") {
+    if (!sf.privateKeyPath) {
+      throw new Error("privateKeyPath required for keypair auth.");
+    }
+    auth = {
+      type: "keypair",
+      privateKeyPath: sf.privateKeyPath,
+      privateKeyPassphrase: undefined
+    };
+  } else {
+    const passwordEnvVar = sf.passwordEnvVar ?? "SNOWFLAKE_PASSWORD";
+    const password = process.env[passwordEnvVar] ?? "";
+    if (!password) {
+      throw new Error(
+        `Password not found. Set env var ${passwordEnvVar} or configure passwordEnvVar in tenant warehouse config.`
+      );
+    }
+    auth = { type: "password", password };
+  }
+  const snowflakeConfig: SnowflakeConfig = {
+    account: sf.account,
+    username: sf.username,
+    warehouse: sf.warehouse,
+    database: sf.database,
+    schema: sf.schema,
+    role: sf.role,
+    logLevel: (env.snowflakeSdkLogLevel ?? "OFF") as SnowflakeConfig["logLevel"],
+    auth
+  };
+  return new SnowflakeWarehouseAdapter(snowflakeConfig);
 }

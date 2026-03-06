@@ -4,6 +4,7 @@ import { buildLlmProvider, buildRuntime, buildSnowflakeWarehouse, buildStore } f
 import { initializeTenant } from "./bootstrap/initTenant.js";
 import { GitDbtRepositoryService } from "./adapters/dbt/dbtRepoService.js";
 import { parseSlackTeamTenantMap, startSlackAgentServer } from "./adapters/channel/slack/slackAgentServer.js";
+import { startAdminServer } from "./adapters/api/adminServer.js";
 import { createId } from "./utils/id.js";
 import { getStringArg, parseArgs } from "./utils/args.js";
 import { env } from "./config/env.js";
@@ -251,7 +252,13 @@ function usage(): string {
     "  npm run dev -- e2e-loop --tenant <id> [--profile default] [--model <provider/model>] [--models <m1,m2>] [--runs 1] [--verbose]",
     "  npm run dev -- prod-smoke --tenant <id> [--model <provider/model>]",
     "  npm run dev -- chat --tenant <id> [--profile default] [--conversation <id>] [--message \"...\"] [--verbose] [--model <provider/model>]",
-    "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000] [--model <provider/model>]"
+    "  npm run dev -- slack [--tenant <id>] [--profile default] [--port 3000] [--model <provider/model>]",
+    "  npm run dev -- slack-map-channel --channel <C...> --tenant <id>",
+    "  npm run dev -- slack-map-user --user <U...> --tenant <id>",
+    "  npm run dev -- slack-map-shared-team --team <T...> --tenant <id>",
+    "  npm run dev -- slack-map-list",
+    "  npm run dev -- slack-map-validate",
+    "  npm run dev -- admin-ui [--port 3100]"
   ].join("\n");
 }
 
@@ -465,25 +472,136 @@ async function run(): Promise<void> {
     return;
   }
 
+  if (command === "slack-map-channel") {
+    const channelId = getStringArg(args, "channel");
+    const tenantId = getStringArg(args, "tenant");
+    store.upsertSlackChannelTenant(channelId, tenantId, "manual");
+    output.write(`${successText("Mapped")} channel ${channelId} -> tenant ${tenantId}\n`);
+    return;
+  }
+
+  if (command === "slack-map-user") {
+    const userId = getStringArg(args, "user");
+    const tenantId = getStringArg(args, "tenant");
+    store.upsertSlackUserTenant(userId, tenantId);
+    output.write(`${successText("Mapped")} user ${userId} -> tenant ${tenantId}\n`);
+    return;
+  }
+
+  if (command === "slack-map-shared-team") {
+    const teamId = getStringArg(args, "team");
+    const tenantId = getStringArg(args, "tenant");
+    store.upsertSlackSharedTeamTenant(teamId, tenantId);
+    output.write(`${successText("Mapped")} shared team ${teamId} -> tenant ${tenantId}\n`);
+    return;
+  }
+
+  if (command === "slack-map-list") {
+    const channels = store.listSlackChannelMappings();
+    const users = store.listSlackUserMappings();
+    const sharedTeams = store.listSlackSharedTeamMappings();
+
+    output.write(`${infoLabel("Channel mappings")} (${channels.length})\n`);
+    for (const m of channels) {
+      output.write(`  ${m.channelId} -> ${m.tenantId} (${m.source}) ${m.updatedAt}\n`);
+    }
+    output.write(`${infoLabel("User mappings")} (${users.length})\n`);
+    for (const m of users) {
+      output.write(`  ${m.userId} -> ${m.tenantId} ${m.updatedAt}\n`);
+    }
+    output.write(`${infoLabel("Shared team mappings")} (${sharedTeams.length})\n`);
+    for (const m of sharedTeams) {
+      output.write(`  ${m.sharedTeamId} -> ${m.tenantId} ${m.updatedAt}\n`);
+    }
+    return;
+  }
+
+  if (command === "slack-map-validate") {
+    const channels = store.listSlackChannelMappings();
+    const users = store.listSlackUserMappings();
+    const sharedTeams = store.listSlackSharedTeamMappings();
+    const allTenantIds = [
+      ...channels.map((c) => c.tenantId),
+      ...users.map((u) => u.tenantId),
+      ...sharedTeams.map((s) => s.tenantId)
+    ];
+    const uniqueTenants = [...new Set(allTenantIds)];
+
+    let ok = true;
+    for (const tenantId of uniqueTenants) {
+      const repo = store.getTenantRepo(tenantId);
+      if (!repo) {
+        output.write(`${warnText("Missing")} tenant ${tenantId}: no dbt repo (run init --tenant ${tenantId})\n`);
+        ok = false;
+      } else {
+        output.write(`${successText("OK")} tenant ${tenantId}: repo configured\n`);
+      }
+    }
+    if (channels.length === 0 && users.length === 0 && sharedTeams.length === 0) {
+      output.write(`${warnText("No mappings")} defined. Add channel/user/shared-team mappings before go-live.\n`);
+      ok = false;
+    }
+    if (ok) {
+      output.write(`${successText("Validation passed.")}\n`);
+    }
+    return;
+  }
+
+  if (command === "admin-ui") {
+    const port = typeof args.port === "string" ? Number.parseInt(args.port, 10) : env.adminPort;
+    startAdminServer({
+      store,
+      port: Number.isFinite(port) ? port : 3100,
+      appDataDir: env.appDataDir
+    });
+    return;
+  }
+
   if (command === "slack") {
     const runtime = buildRuntime(store);
+    const guardrails = store.getGuardrails();
     const defaultTenantId =
-      (typeof args.tenant === "string" ? args.tenant : undefined) || env.slackDefaultTenantId || undefined;
+      (typeof args.tenant === "string" ? args.tenant : undefined) ||
+      env.slackDefaultTenantId ||
+      guardrails?.defaultTenantId ||
+      undefined;
     const defaultProfileName =
       (typeof args.profile === "string" ? args.profile : undefined) || env.slackDefaultProfileName || "default";
     const llmModel = typeof args.model === "string" ? args.model : env.llmModel;
     const port = typeof args.port === "string" ? Number.parseInt(args.port, 10) : env.slackPort;
-    const teamTenantMap = parseSlackTeamTenantMap(env.slackTeamTenantMapRaw);
+    const teamTenantMap =
+      guardrails?.teamTenantMap && Object.keys(guardrails.teamTenantMap).length > 0
+        ? guardrails.teamTenantMap
+        : parseSlackTeamTenantMap(env.slackTeamTenantMapRaw);
+    const ownerTeamIds =
+      guardrails?.ownerTeamIds && guardrails.ownerTeamIds.length > 0
+        ? guardrails.ownerTeamIds
+        : env.slackOwnerTeamIdsRaw
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+    const ownerEnterpriseIds =
+      guardrails?.ownerEnterpriseIds && guardrails.ownerEnterpriseIds.length > 0
+        ? guardrails.ownerEnterpriseIds
+        : env.slackOwnerEnterpriseIdsRaw
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+    const strictTenantRouting = guardrails?.strictTenantRouting ?? env.slackStrictTenantRouting;
 
     await startSlackAgentServer({
       runtime,
+      store,
       botToken: env.slackBotToken,
       signingSecret: env.slackSigningSecret,
       port: Number.isFinite(port) ? port : 3000,
       defaultTenantId,
       defaultProfileName,
       llmModel,
-      teamTenantMap
+      teamTenantMap,
+      ownerTeamIds,
+      ownerEnterpriseIds,
+      strictTenantRouting
     });
     return;
   }

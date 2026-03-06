@@ -2,9 +2,12 @@ import { App } from "@slack/bolt";
 import { ChartJSNodeCanvas } from "chartjs-node-canvas";
 import type { ChartConfiguration } from "chart.js";
 import { AnalyticsAgentRuntime } from "../../../core/agentRuntime.js";
+import type { ConversationStore } from "../../../core/interfaces.js";
+import type { SlackTenantResolution } from "../../../core/interfaces.js";
 
 export interface SlackAgentServerOptions {
   runtime: AnalyticsAgentRuntime;
+  store: ConversationStore;
   botToken: string;
   signingSecret: string;
   port: number;
@@ -12,6 +15,9 @@ export interface SlackAgentServerOptions {
   defaultProfileName?: string;
   llmModel?: string;
   teamTenantMap?: Record<string, string>;
+  ownerTeamIds?: string[];
+  ownerEnterpriseIds?: string[];
+  strictTenantRouting?: boolean;
 }
 
 function parseMessageText(raw: string): string {
@@ -31,18 +37,104 @@ function getTeamId(body: unknown, event: Record<string, unknown>): string | null
   return null;
 }
 
-function resolveTenantId(
-  teamId: string | null,
-  defaultTenantId: string | undefined,
-  teamTenantMap: Record<string, string> | undefined
-): string | null {
-  if (teamId && teamTenantMap?.[teamId]) {
-    return teamTenantMap[teamId];
-  }
-  if (defaultTenantId && defaultTenantId.length > 0) {
-    return defaultTenantId;
+function getEnterpriseId(body: unknown): string | null {
+  const bodyObj = body as Record<string, unknown>;
+  const enterpriseId = bodyObj["enterprise_id"];
+  if (typeof enterpriseId === "string" && enterpriseId.length > 0) {
+    return enterpriseId;
   }
   return null;
+}
+
+function getUserId(event: Record<string, unknown>): string | null {
+  const userId = event["user"];
+  if (typeof userId === "string" && userId.length > 0) {
+    return userId;
+  }
+  return null;
+}
+
+function isOwnerContext(
+  teamId: string | null,
+  enterpriseId: string | null,
+  ownerTeamIds: string[],
+  ownerEnterpriseIds: string[]
+): boolean {
+  if (teamId && ownerTeamIds.includes(teamId)) {
+    return true;
+  }
+  if (enterpriseId && ownerEnterpriseIds.includes(enterpriseId)) {
+    return true;
+  }
+  return false;
+}
+
+function resolveTenantForSlackMessage(input: {
+  store: ConversationStore;
+  channelId: string;
+  userId: string | null;
+  teamId: string | null;
+  enterpriseId: string | null;
+  sharedTeamIds: string[];
+  isDm: boolean;
+  defaultTenantId: string | undefined;
+  teamTenantMap: Record<string, string>;
+  ownerTeamIds: string[];
+  ownerEnterpriseIds: string[];
+  strictTenantRouting: boolean;
+}): SlackTenantResolution {
+  const {
+    store,
+    channelId,
+    userId,
+    teamId,
+    enterpriseId,
+    sharedTeamIds,
+    isDm,
+    defaultTenantId,
+    teamTenantMap,
+    ownerTeamIds,
+    ownerEnterpriseIds,
+    strictTenantRouting
+  } = input;
+
+  const channelTenant = store.getSlackChannelTenant(channelId);
+  if (channelTenant) {
+    return { tenantId: channelTenant, rule: "channel" };
+  }
+
+  for (const sharedTeamId of sharedTeamIds) {
+    const sharedTenant = store.getSlackSharedTeamTenant(sharedTeamId);
+    if (sharedTenant) {
+      return { tenantId: sharedTenant, rule: "shared_team" };
+    }
+  }
+
+  if (isDm && userId) {
+    const userTenant = store.getSlackUserTenant(userId);
+    if (userTenant) {
+      return { tenantId: userTenant, rule: "user" };
+    }
+  }
+
+  if (teamId && teamTenantMap[teamId]) {
+    return { tenantId: teamTenantMap[teamId], rule: "team" };
+  }
+
+  const ownerContext = isOwnerContext(teamId, enterpriseId, ownerTeamIds, ownerEnterpriseIds);
+  if (ownerContext && defaultTenantId && defaultTenantId.length > 0) {
+    return { tenantId: defaultTenantId, rule: "owner_default" };
+  }
+
+  if (strictTenantRouting) {
+    return { tenantId: "", rule: "unmapped" };
+  }
+
+  if (defaultTenantId && defaultTenantId.length > 0) {
+    return { tenantId: defaultTenantId, rule: "owner_default" };
+  }
+
+  return { tenantId: "", rule: "unmapped" };
 }
 
 function buildConversationId(teamId: string, channelId: string, threadTs: string): string {
@@ -143,23 +235,87 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
   });
 
   const processMessage = async (input: {
+    body: unknown;
     teamId: string | null;
+    userId: string | null;
     channel: string;
     threadTs: string;
     text: string;
     currentTs: string;
     includeThreadContext: boolean;
+    isDm: boolean;
     client: App["client"];
   }): Promise<void> => {
     const processingReaction = "hourglass_flowing_sand";
     let reactionAdded = false;
-    const tenantId = resolveTenantId(input.teamId, options.defaultTenantId, options.teamTenantMap);
-    if (!tenantId) {
+
+    let sharedTeamIds: string[] = [];
+    if (!input.isDm) {
+      try {
+        const channelInfo = await input.client.conversations.info({
+          channel: input.channel,
+          include_num_members: false
+        });
+        const chan = channelInfo.channel as { shared_team_ids?: string[] } | undefined;
+        sharedTeamIds = Array.isArray(chan?.shared_team_ids) ? chan.shared_team_ids : [];
+      } catch {
+        sharedTeamIds = [];
+      }
+    }
+
+    const resolution = resolveTenantForSlackMessage({
+      store: options.store,
+      channelId: input.channel,
+      userId: input.userId,
+      teamId: input.teamId,
+      enterpriseId: getEnterpriseId(input.body),
+      sharedTeamIds,
+      isDm: input.isDm,
+      defaultTenantId: options.defaultTenantId,
+      teamTenantMap: options.teamTenantMap ?? {},
+      ownerTeamIds: options.ownerTeamIds ?? [],
+      ownerEnterpriseIds: options.ownerEnterpriseIds ?? [],
+      strictTenantRouting: options.strictTenantRouting ?? false
+    });
+
+    if (resolution.rule === "unmapped" || !resolution.tenantId) {
       await input.client.chat.postMessage({
         channel: input.channel,
         thread_ts: input.threadTs,
-        text: "No tenant mapping found for this Slack workspace. Configure SLACK_DEFAULT_TENANT_ID or SLACK_TEAM_TENANT_MAP."
+        text: "No tenant mapping found for this Slack workspace or channel. Configure channel mapping (slack-map-channel), user mapping (slack-map-user), or SLACK_TEAM_TENANT_MAP."
       });
+      return;
+    }
+
+    const tenantId = resolution.tenantId;
+
+    if (options.store.logSlackTenantRoutingAudit) {
+      options.store.logSlackTenantRoutingAudit({
+        messageTs: input.currentTs,
+        channelId: input.channel,
+        userId: input.userId,
+        resolvedTenant: tenantId,
+        ruleUsed: resolution.rule
+      });
+    }
+
+    if (process.env.AGENT_VERBOSE === "1" || process.env.AGENT_VERBOSE?.toLowerCase() === "true") {
+      process.stderr.write(
+        `[slack] tenant=${tenantId} rule=${resolution.rule} channel=${input.channel} team=${input.teamId ?? "n/a"}\n`
+      );
+    }
+
+    if (
+      (resolution.rule === "team" || resolution.rule === "owner_default") &&
+      options.strictTenantRouting === false
+    ) {
+      process.stderr.write(
+        `[slack] Warning: using fallback rule "${resolution.rule}". For production, prefer explicit channel/user mapping. Set SLACK_STRICT_TENANT_ROUTING=true to require mappings.\n`
+      );
+    }
+
+    if (!tenantId || tenantId.length === 0) {
+      process.stderr.write("[slack] Assertion failed: tenantId must be non-empty before respond.\n");
       return;
     }
 
@@ -276,12 +432,15 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     }
 
     void processMessage({
+      body,
       teamId: getTeamId(body, slackEvent),
+      userId: getUserId(slackEvent),
       channel,
       threadTs: typeof threadTs === "string" ? threadTs : ts,
       text: parseMessageText(text),
       currentTs: ts,
       includeThreadContext: typeof threadTs === "string" && threadTs.length > 0,
+      isDm: false,
       client
     });
   });
@@ -304,12 +463,15 @@ export async function startSlackAgentServer(options: SlackAgentServerOptions): P
     }
 
     void processMessage({
+      body,
       teamId: getTeamId(body, slackMessage),
+      userId: getUserId(slackMessage),
       channel,
       threadTs: typeof threadTs === "string" ? threadTs : ts,
       text: text.trim(),
       currentTs: ts,
       includeThreadContext: false,
+      isDm: true,
       client
     });
   });

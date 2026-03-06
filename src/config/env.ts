@@ -32,7 +32,12 @@ export const env = {
   slackDefaultTenantId: process.env.SLACK_DEFAULT_TENANT_ID ?? "",
   slackDefaultProfileName: process.env.SLACK_DEFAULT_PROFILE_NAME ?? "default",
   slackTeamTenantMapRaw: process.env.SLACK_TEAM_TENANT_MAP ?? "",
+  slackOwnerTeamIdsRaw: process.env.SLACK_OWNER_TEAM_IDS ?? "",
+  slackOwnerEnterpriseIdsRaw: process.env.SLACK_OWNER_ENTERPRISE_IDS ?? "",
+  slackStrictTenantRouting: process.env.SLACK_STRICT_TENANT_ROUTING === "1" || process.env.SLACK_STRICT_TENANT_ROUTING?.toLowerCase() === "true",
   verboseMode: process.env.AGENT_VERBOSE === "1" || process.env.AGENT_VERBOSE?.toLowerCase() === "true",
+  adminPort: Number.parseInt(process.env.ADMIN_PORT ?? "3100", 10),
+  adminBearerToken: process.env.ADMIN_BEARER_TOKEN ?? "",
   require(name: string): string {
     return required(name);
   }
