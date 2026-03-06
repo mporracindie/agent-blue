@@ -25,16 +25,31 @@ const chartRequestSchema = z.object({
   xKey: z.string().optional(),
   yKey: z.string().optional(),
   seriesKey: z.string().optional(),
+  horizontal: z.boolean().optional(),
+  stacked: z.boolean().optional(),
+  grouped: z.boolean().optional(),
+  percentStacked: z.boolean().optional(),
+  sort: z.enum(["none", "asc", "desc", "label_asc", "label_desc"]).optional(),
+  smooth: z.boolean().optional(),
+  tension: z.number().min(0).max(1).optional(),
+  fill: z.boolean().optional(),
+  step: z.boolean().optional(),
+  pointRadius: z.number().min(0).max(20).optional(),
+  donutCutout: z.number().int().min(0).max(95).optional(),
+  showPercentLabels: z.boolean().optional(),
+  topN: z.number().int().positive().max(200).optional(),
+  otherLabel: z.string().optional(),
+  stackId: z.string().optional(),
   maxPoints: z.number().int().positive().max(500).optional()
 });
 
-const plannerSchema = z.object({
-  action: z.enum(["answer", "query_snowflake", "inspect_dbt_model", "lookup_snowflake_metadata", "build_chart"]),
+const toolDecisionSchema = z.object({
+  type: z.enum(["tool_call", "final_answer"]),
+  tool: z
+    .enum(["snowflake.query", "dbt.listModels", "dbt.getModelSql", "snowflake.lookupMetadata", "chartjs.build"])
+    .optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
   answer: z.string().optional(),
-  sql: z.string().optional(),
-  modelName: z.string().optional(),
-  metadataLookup: metadataLookupSchema.optional(),
-  chartRequest: chartRequestSchema.optional(),
   reasoning: z.string().optional()
 });
 
@@ -125,7 +140,7 @@ export class AnalyticsAgentRuntime {
   async respond(context: AgentContext, userText: string): Promise<AgentResponse> {
     const startedAt = Date.now();
     const timings: Record<string, number> = {};
-    const maxPlannerSteps = 6;
+    const maxToolSteps = 8;
     const plannerAttempts: Array<{ step: number; raw?: string; parseError?: string; plan?: Record<string, unknown> }> = [];
     const attemptedSql = new Set<string>();
     const toolCalls: Array<{
@@ -223,18 +238,15 @@ export class AnalyticsAgentRuntime {
         content: m.content
       }));
 
-    const planningMessages = (): LlmMessage[] => [
+    const baseMessages = (): LlmMessage[] => [
       {
         role: "system",
         content: [
           profile.soulPrompt,
           "",
-          "You are an analytics orchestrator. Decide if you can directly answer the user,",
-          "need to query Snowflake, inspect warehouse metadata (schemas/tables/columns), inspect a dbt model file, or build a chart config.",
+          "You are an analytics assistant with tools. Use tools iteratively and then provide a final answer.",
           `Current date/time (UTC): ${currentDateIso}`,
           `Current date (UTC): ${currentDate}`,
-          "You can run multiple tool calls iteratively before providing the final answer.",
-          "Prefer accuracy over speed. If table lineage is unclear, inspect a dbt model before querying.",
           "",
           "SQL generation requirements (strict):",
           "- Use fully-qualified Snowflake object names in every query: DATABASE.SCHEMA.OBJECT.",
@@ -243,17 +255,29 @@ export class AnalyticsAgentRuntime {
             ? `- Start with ${fqPrefix} as a default guess, but do not treat schema as fixed.`
             : "- SNOWFLAKE_DATABASE/SCHEMA defaults are unavailable, so infer carefully and avoid guessing.",
           `- Allowed/expected schema candidates to consider: ${schemaCandidates.join(", ")}.`,
-          "- Use dbt model path hints and inspected dbt SQL to choose schema (for example, marts -> MARTS, intermediate/int -> INT).",
-          "- Prefer relations that match synced dbt model names.",
-          "- When uncertain about the correct relation, return action `inspect_dbt_model` first.",
-          "- If table/schema/column names are uncertain, return action `lookup_snowflake_metadata` first.",
-          "- If the user requests a visualization, prefer action `build_chart` after at least one successful query.",
-          "- If a Snowflake query fails, inspect the tool error and return a corrected SQL query.",
-          "- After relation-not-found errors, try alternative schemas and avoid assuming only one schema.",
+          "- Use dbt model path hints and inspected dbt SQL to choose schema.",
+          "- If table/schema/column names are uncertain, use snowflake.lookupMetadata.",
+          "- If dbt lineage is uncertain, use dbt.getModelSql.",
+          "- If visualization is requested, call chartjs.build after at least one successful query.",
+          "- When a chart artifact is generated with chartjs.build, do NOT draw an ASCII/Markdown/text chart in the answer.",
+          "- With chart artifacts, keep the narrative concise: key takeaway(s), notable outliers, and caveats only.",
+          "- For chart queries with time on x-axis, ALWAYS return a normalized time label column:",
+          "  - monthly: TO_CHAR(DATE_TRUNC('month', <timestamp_col>), 'YYYY-MM') AS period_label",
+          "  - daily: TO_CHAR(DATE_TRUNC('day', <timestamp_col>), 'YYYY-MM-DD') AS period_label",
+          "- Always ORDER BY the same normalized period label (or underlying truncated date) ascending.",
+          "- Prefer using the normalized label column as xKey for chartjs.build.",
           "- Do not repeat the exact same failing SQL.",
           "",
-          "Return ONLY valid JSON with fields:",
-          '{ "action": "answer|query_snowflake|inspect_dbt_model|lookup_snowflake_metadata|build_chart", "answer"?: string, "sql"?: string, "modelName"?: string, "metadataLookup"?: { "kind": "schemas|tables|columns", "database"?: string, "schema"?: string, "table"?: string, "search"?: string }, "chartRequest"?: { "type"?: "bar|line|pie|doughnut", "title"?: string, "xKey"?: string, "yKey"?: string, "seriesKey"?: string, "maxPoints"?: number }, "reasoning"?: string }',
+          "Available tools and args:",
+          "- snowflake.query: { sql: string }",
+          "- dbt.listModels: {}",
+          "- dbt.getModelSql: { modelName: string }",
+          '- snowflake.lookupMetadata: { kind: "schemas"|"tables"|"columns", database?: string, schema?: string, table?: string, search?: string }',
+          '- chartjs.build: { type?: "bar"|"line"|"pie"|"doughnut", title?: string, xKey?: string, yKey?: string, seriesKey?: string, horizontal?: boolean, stacked?: boolean, grouped?: boolean, percentStacked?: boolean, sort?: "none"|"asc"|"desc"|"label_asc"|"label_desc", smooth?: boolean, tension?: number, fill?: boolean, step?: boolean, pointRadius?: number, donutCutout?: number, showPercentLabels?: boolean, topN?: number, otherLabel?: string, stackId?: string, maxPoints?: number }',
+          "",
+          "Return ONLY valid JSON in one of these shapes:",
+          '{ "type": "tool_call", "tool": "snowflake.query|dbt.listModels|dbt.getModelSql|snowflake.lookupMetadata|chartjs.build", "args": { ... }, "reasoning"?: string }',
+          '{ "type": "final_answer", "answer": string, "reasoning"?: string }',
           "",
           `Max query rows per profile: ${profile.maxRowsPerQuery}.`
         ].join("\n")
@@ -287,44 +311,44 @@ export class AnalyticsAgentRuntime {
           })
           .join("\n")}`
       },
-      {
-        role: "system",
-        content:
-          toolCalls.length === 0
-            ? "Tool call history: none yet."
-            : `Tool call history (full context, including failures):\n${asJsonBlock(toolCalls)}`
-      },
       ...historyMessages,
       {
         role: "user",
         content: userText
       }
     ];
-    let finalPlan: z.infer<typeof plannerSchema> | undefined;
+
+    const loopMessages: LlmMessage[] = [];
+    let finalPlan: z.infer<typeof toolDecisionSchema> | undefined;
     let finalSql: string | undefined;
     let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
     let latestChartArtifact: AgentArtifact | undefined;
 
-    for (let step = 1; step <= maxPlannerSteps; step += 1) {
+    for (let step = 1; step <= maxToolSteps; step += 1) {
       const planRaw = await measure(`plannerMs_step${step}`, async () =>
         this.llm.generateText({
           model: llmModel,
-          messages: planningMessages(),
+          messages: [...baseMessages(), ...loopMessages],
           temperature: 0
         })
       );
 
-      let plan: z.infer<typeof plannerSchema>;
+      let plan: z.infer<typeof toolDecisionSchema>;
       try {
-        plan = plannerSchema.parse(JSON.parse(planRaw));
+        plan = toolDecisionSchema.parse(JSON.parse(planRaw));
         plannerAttempts.push({ step, raw: planRaw, plan: plan as Record<string, unknown> });
       } catch (error) {
         plannerAttempts.push({ step, raw: planRaw, parseError: (error as Error).message });
+        loopMessages.push({
+          role: "user",
+          content: `Invalid JSON response. Error: ${(error as Error).message}. Return valid JSON only.`
+        });
         continue;
       }
       finalPlan = plan;
+      loopMessages.push({ role: "assistant", content: planRaw });
 
-      if (plan.action === "answer") {
+      if (plan.type === "final_answer") {
         const text = plan.answer?.trim() ? plan.answer : "I need more details to answer that.";
         this.store.addMessage({
           tenantId: context.tenantId,
@@ -340,77 +364,82 @@ export class AnalyticsAgentRuntime {
             plannerAttempts,
             sql: finalSql,
             toolCalls,
+            mode: "direct_tool_loop",
             timings: { ...timings, totalMs: Date.now() - startedAt }
           }
         };
       }
 
-      if (plan.action === "inspect_dbt_model") {
-        const modelName = plan.modelName?.trim();
-        if (!modelName) {
-          toolCalls.push({
-            tool: "dbt.getModelSql",
-            input: { tenantId: context.tenantId, modelName: null },
-            status: "error",
-            durationMs: 0,
-            error: "Planner selected inspect_dbt_model without modelName."
-          });
-          continue;
-        }
-        const modelSql = await measure("getModelSqlMs", async () =>
-          runTool(
-            "dbt.getModelSql",
-            { tenantId: context.tenantId, modelName },
-            async () => this.dbtRepo.getModelSql(context.tenantId, modelName),
-            (sqlText) => ({ found: Boolean(sqlText), modelName }),
-            (sqlText) => ({ modelName, sql: sqlText })
-          )
-        );
-        if (!modelSql) {
-          toolCalls.push({
-            tool: "dbt.getModelSql",
-            input: { tenantId: context.tenantId, modelName },
-            status: "error",
-            durationMs: 0,
-            error: `Model "${modelName}" was not found in configured dbt repo.`
-          });
-          continue;
-        }
+      if (plan.type !== "tool_call" || !plan.tool) {
+        loopMessages.push({
+          role: "user",
+          content: "Return either a valid tool_call or final_answer JSON."
+        });
         continue;
       }
 
-      if (plan.action === "lookup_snowflake_metadata") {
-        const parsedLookup = metadataLookupSchema.safeParse(plan.metadataLookup);
-        if (!parsedLookup.success) {
-          toolCalls.push({
-            tool: "snowflake.lookupMetadata",
-            input: { metadataLookup: plan.metadataLookup ?? null },
-            status: "error",
-            durationMs: 0,
-            error: "Planner selected lookup_snowflake_metadata without valid metadataLookup payload."
+      const args = (plan.args ?? {}) as Record<string, unknown>;
+      try {
+        if (plan.tool === "dbt.listModels") {
+          const models = await runTool(
+            "dbt.listModels",
+            { tenantId: context.tenantId },
+            async () => this.dbtRepo.listModels(context.tenantId),
+            (value) => ({ modelCount: value.length }),
+            (value) => ({
+              modelCount: value.length,
+              models: value.slice(0, 100).map((m) => ({ name: m.name, relativePath: m.relativePath }))
+            })
+          );
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (dbt.listModels): ${asJsonBlock({
+              modelCount: models.length,
+              models: models.slice(0, 100).map((m) => ({ name: m.name, relativePath: m.relativePath }))
+            })}`
           });
           continue;
         }
 
-        const metadataSql = buildMetadataLookupSql(
-          parsedLookup.data,
-          snowflakeDatabase,
-          snowflakeSchema,
-          profile.maxRowsPerQuery
-        );
-        if (!metadataSql) {
-          toolCalls.push({
-            tool: "snowflake.lookupMetadata",
-            input: parsedLookup.data as unknown as Record<string, unknown>,
-            status: "error",
-            durationMs: 0,
-            error: "Metadata lookup requires a database (from env or metadataLookup.database)."
+        if (plan.tool === "dbt.getModelSql") {
+          const modelName = typeof args.modelName === "string" ? args.modelName.trim() : "";
+          if (!modelName) {
+            throw new Error("dbt.getModelSql requires args.modelName.");
+          }
+          const modelSql = await measure("getModelSqlMs", async () =>
+            runTool(
+              "dbt.getModelSql",
+              { tenantId: context.tenantId, modelName },
+              async () => this.dbtRepo.getModelSql(context.tenantId, modelName),
+              (sqlText) => ({ found: Boolean(sqlText), modelName }),
+              (sqlText) => ({ modelName, sql: sqlText })
+            )
+          );
+          if (!modelSql) {
+            throw new Error(`Model "${modelName}" was not found in configured dbt repo.`);
+          }
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (dbt.getModelSql): ${asJsonBlock({ modelName, sql: modelSql })}`
           });
           continue;
         }
 
-        try {
-          await runTool(
+        if (plan.tool === "snowflake.lookupMetadata") {
+          const parsedLookup = metadataLookupSchema.safeParse(args);
+          if (!parsedLookup.success) {
+            throw new Error("snowflake.lookupMetadata requires valid lookup args.");
+          }
+          const metadataSql = buildMetadataLookupSql(
+            parsedLookup.data,
+            snowflakeDatabase,
+            snowflakeSchema,
+            profile.maxRowsPerQuery
+          );
+          if (!metadataSql) {
+            throw new Error("Metadata lookup requires database context.");
+          }
+          const metadataResult = await runTool(
             "snowflake.lookupMetadata",
             { ...parsedLookup.data, sql: metadataSql },
             async () => this.warehouse.query(metadataSql),
@@ -421,43 +450,29 @@ export class AnalyticsAgentRuntime {
               rows: result.rows.slice(0, profile.maxRowsPerQuery)
             })
           );
-        } catch {
-          // Keep iterating with full failed metadata lookup context.
-        }
-        continue;
-      }
-
-      if (plan.action === "build_chart") {
-        const parsedRequest = chartRequestSchema.safeParse(plan.chartRequest ?? {});
-        if (!parsedRequest.success) {
-          toolCalls.push({
-            tool: "chartjs.build",
-            input: { chartRequest: plan.chartRequest ?? null },
-            status: "error",
-            durationMs: 0,
-            error: "Planner selected build_chart with invalid chartRequest payload."
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (snowflake.lookupMetadata): ${asJsonBlock({
+              columns: metadataResult.columns,
+              rowCount: metadataResult.rowCount,
+              rows: metadataResult.rows.slice(0, profile.maxRowsPerQuery)
+            })}`
           });
           continue;
         }
-        if (!lastSuccessfulQuery) {
-          toolCalls.push({
-            tool: "chartjs.build",
-            input: { chartRequest: parsedRequest.data as ChartBuildRequest },
-            status: "error",
-            durationMs: 0,
-            error: "No successful query result available yet. Run query_snowflake first."
-          });
-          continue;
-        }
-        const successfulQuery = lastSuccessfulQuery;
 
-        try {
+        if (plan.tool === "chartjs.build") {
+          const parsedRequest = chartRequestSchema.safeParse(args);
+          if (!parsedRequest.success) {
+            throw new Error("chartjs.build requires valid chart args.");
+          }
+          if (!lastSuccessfulQuery) {
+            throw new Error("No successful query result available yet. Run snowflake.query first.");
+          }
+          const successfulQuery = lastSuccessfulQuery;
           const chartBuild = await runTool(
             "chartjs.build",
-            {
-              chartRequest: parsedRequest.data as ChartBuildRequest,
-              sourceSql: successfulQuery.sql
-            },
+            { chartRequest: parsedRequest.data as ChartBuildRequest, sourceSql: successfulQuery.sql },
             async () =>
               this.chartTool.buildFromQueryResult({
                 request: parsedRequest.data as ChartBuildRequest,
@@ -473,55 +488,58 @@ export class AnalyticsAgentRuntime {
             payload: chartBuild.config,
             summary: chartBuild.summary
           };
-        } catch {
-          // Keep iterating with full failed chart-build context.
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (chartjs.build): ${asJsonBlock(chartBuild.summary)}`
+          });
+          continue;
         }
-        continue;
-      }
 
-      const sql = plan.sql?.trim();
-      if (!sql) {
-        toolCalls.push({
-          tool: "snowflake.query",
-          input: { sql: null },
-          status: "error",
-          durationMs: 0,
-          error: "Planner selected query_snowflake without sql."
+        if (plan.tool === "snowflake.query") {
+          const sql = typeof args.sql === "string" ? args.sql.trim() : "";
+          if (!sql) {
+            throw new Error("snowflake.query requires args.sql.");
+          }
+          const normalizedSql = this.sqlGuard
+            .normalize(sql)
+            .replace(/\blimit\s+\d+\b/i, `LIMIT ${profile.maxRowsPerQuery}`);
+          if (attemptedSql.has(normalizedSql)) {
+            throw new Error("Duplicate SQL attempt in this turn. Generate a different query.");
+          }
+          attemptedSql.add(normalizedSql);
+          finalSql = normalizedSql;
+          const queryResult = await measure("snowflakeMs", async () =>
+            runTool(
+              "snowflake.query",
+              { sql: normalizedSql },
+              async () => this.warehouse.query(normalizedSql),
+              (result) => ({ rowCount: result.rowCount, columns: result.columns }),
+              (result) => ({
+                columns: result.columns,
+                rowCount: result.rowCount,
+                rows: result.rows.slice(0, profile.maxRowsPerQuery)
+              })
+            )
+          );
+          lastSuccessfulQuery = { sql: normalizedSql, result: queryResult };
+          loopMessages.push({
+            role: "user",
+            content: `Tool result (snowflake.query): ${asJsonBlock({
+              sql: normalizedSql,
+              columns: queryResult.columns,
+              rowCount: queryResult.rowCount,
+              rows: queryResult.rows.slice(0, profile.maxRowsPerQuery)
+            })}`
+          });
+          continue;
+        }
+
+        throw new Error(`Unsupported tool: ${plan.tool}`);
+      } catch (error) {
+        loopMessages.push({
+          role: "user",
+          content: `Tool error (${plan.tool}): ${(error as Error).message}. Choose a corrected tool call or final_answer.`
         });
-        continue;
-      }
-
-      const normalizedSql = this.sqlGuard.normalize(sql).replace(/\blimit\s+\d+\b/i, `LIMIT ${profile.maxRowsPerQuery}`);
-      if (attemptedSql.has(normalizedSql)) {
-        toolCalls.push({
-          tool: "snowflake.query",
-          input: { sql: normalizedSql },
-          status: "error",
-          durationMs: 0,
-          error: "Duplicate SQL attempt in this turn. Generate a different query."
-        });
-        continue;
-      }
-      attemptedSql.add(normalizedSql);
-      finalSql = normalizedSql;
-
-      try {
-        const queryResult = await measure("snowflakeMs", async () =>
-          runTool(
-            "snowflake.query",
-            { sql: normalizedSql },
-            async () => this.warehouse.query(normalizedSql),
-            (result) => ({ rowCount: result.rowCount, columns: result.columns }),
-            (result) => ({
-              columns: result.columns,
-              rowCount: result.rowCount,
-              rows: result.rows.slice(0, profile.maxRowsPerQuery)
-            })
-          )
-        );
-        lastSuccessfulQuery = { sql: normalizedSql, result: queryResult };
-      } catch {
-        // Keep iterating; planner will receive full failed tool context and can retry with corrected SQL.
       }
     }
 
@@ -575,6 +593,7 @@ export class AnalyticsAgentRuntime {
           plannerAttempts,
           sql: lastSuccessfulQuery.sql,
           toolCalls,
+          mode: "direct_tool_loop",
           timings: { ...timings, totalMs: Date.now() - startedAt },
           finalizedFromLastSuccessfulQuery: true
         }
@@ -596,6 +615,7 @@ export class AnalyticsAgentRuntime {
         plannerAttempts,
         sql: finalSql,
         toolCalls,
+        mode: "direct_tool_loop",
         timings: { ...timings, totalMs: Date.now() - startedAt }
       }
     };

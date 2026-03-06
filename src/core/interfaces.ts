@@ -19,6 +19,21 @@ export interface ChartBuildRequest {
   xKey?: string;
   yKey?: string;
   seriesKey?: string;
+  horizontal?: boolean;
+  stacked?: boolean;
+  grouped?: boolean;
+  percentStacked?: boolean;
+  sort?: "none" | "asc" | "desc" | "label_asc" | "label_desc";
+  smooth?: boolean;
+  tension?: number;
+  fill?: boolean;
+  step?: boolean;
+  pointRadius?: number;
+  donutCutout?: number;
+  showPercentLabels?: boolean;
+  topN?: number;
+  otherLabel?: string;
+  stackId?: string;
   maxPoints?: number;
 }
 

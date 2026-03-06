@@ -8,7 +8,10 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "slack:server": "npm run dev -- slack --tenant takenos --profile default --port 3000",
+    "tunnel": "cloudflared tunnel --config cloudflared-agent-blue.yml run agent-blue-slack",
+    "slack:local": "concurrently -k -n tunnel,slack -c cyan,green \"npm run tunnel\" \"npm run slack:server\""
   },
   "repository": {
     "type": "git",
@@ -25,12 +28,14 @@
     "@slack/bolt": "^4.6.0",
     "better-sqlite3": "^12.6.2",
     "chart.js": "^4.5.1",
+    "chartjs-node-canvas": "^5.0.0",
     "dotenv": "^17.3.1",
     "snowflake-sdk": "^2.3.4",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "concurrently": "^9.2.1",
     "@types/node": "^25.3.3",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
