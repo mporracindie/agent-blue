@@ -1,6 +1,14 @@
 import { z } from "zod";
-import { ConversationStore, DbtRepositoryService, LlmMessage, LlmProvider, WarehouseAdapter } from "./interfaces.js";
-import { AgentContext, AgentResponse, QueryResult } from "./types.js";
+import {
+  ChartBuildRequest,
+  ChartTool,
+  ConversationStore,
+  DbtRepositoryService,
+  LlmMessage,
+  LlmProvider,
+  WarehouseAdapter
+} from "./interfaces.js";
+import { AgentArtifact, AgentContext, AgentResponse, QueryResult } from "./types.js";
 import { SqlGuard } from "./sqlGuard.js";
 
 const metadataLookupSchema = z.object({
@@ -11,12 +19,22 @@ const metadataLookupSchema = z.object({
   search: z.string().optional()
 });
 
+const chartRequestSchema = z.object({
+  type: z.enum(["bar", "line", "pie", "doughnut"]).optional(),
+  title: z.string().optional(),
+  xKey: z.string().optional(),
+  yKey: z.string().optional(),
+  seriesKey: z.string().optional(),
+  maxPoints: z.number().int().positive().max(500).optional()
+});
+
 const plannerSchema = z.object({
-  action: z.enum(["answer", "query_snowflake", "inspect_dbt_model", "lookup_snowflake_metadata"]),
+  action: z.enum(["answer", "query_snowflake", "inspect_dbt_model", "lookup_snowflake_metadata", "build_chart"]),
   answer: z.string().optional(),
   sql: z.string().optional(),
   modelName: z.string().optional(),
   metadataLookup: metadataLookupSchema.optional(),
+  chartRequest: chartRequestSchema.optional(),
   reasoning: z.string().optional()
 });
 
@@ -98,6 +116,7 @@ export class AnalyticsAgentRuntime {
   constructor(
     private readonly llm: LlmProvider,
     private readonly warehouse: WarehouseAdapter,
+    private readonly chartTool: ChartTool,
     private readonly dbtRepo: DbtRepositoryService,
     private readonly store: ConversationStore,
     private readonly sqlGuard: SqlGuard
@@ -211,7 +230,7 @@ export class AnalyticsAgentRuntime {
           profile.soulPrompt,
           "",
           "You are an analytics orchestrator. Decide if you can directly answer the user,",
-          "need to query Snowflake, inspect warehouse metadata (schemas/tables/columns), or inspect a dbt model file.",
+          "need to query Snowflake, inspect warehouse metadata (schemas/tables/columns), inspect a dbt model file, or build a chart config.",
           `Current date/time (UTC): ${currentDateIso}`,
           `Current date (UTC): ${currentDate}`,
           "You can run multiple tool calls iteratively before providing the final answer.",
@@ -228,12 +247,13 @@ export class AnalyticsAgentRuntime {
           "- Prefer relations that match synced dbt model names.",
           "- When uncertain about the correct relation, return action `inspect_dbt_model` first.",
           "- If table/schema/column names are uncertain, return action `lookup_snowflake_metadata` first.",
+          "- If the user requests a visualization, prefer action `build_chart` after at least one successful query.",
           "- If a Snowflake query fails, inspect the tool error and return a corrected SQL query.",
           "- After relation-not-found errors, try alternative schemas and avoid assuming only one schema.",
           "- Do not repeat the exact same failing SQL.",
           "",
           "Return ONLY valid JSON with fields:",
-          '{ "action": "answer|query_snowflake|inspect_dbt_model|lookup_snowflake_metadata", "answer"?: string, "sql"?: string, "modelName"?: string, "metadataLookup"?: { "kind": "schemas|tables|columns", "database"?: string, "schema"?: string, "table"?: string, "search"?: string }, "reasoning"?: string }',
+          '{ "action": "answer|query_snowflake|inspect_dbt_model|lookup_snowflake_metadata|build_chart", "answer"?: string, "sql"?: string, "modelName"?: string, "metadataLookup"?: { "kind": "schemas|tables|columns", "database"?: string, "schema"?: string, "table"?: string, "search"?: string }, "chartRequest"?: { "type"?: "bar|line|pie|doughnut", "title"?: string, "xKey"?: string, "yKey"?: string, "seriesKey"?: string, "maxPoints"?: number }, "reasoning"?: string }',
           "",
           `Max query rows per profile: ${profile.maxRowsPerQuery}.`
         ].join("\n")
@@ -283,6 +303,7 @@ export class AnalyticsAgentRuntime {
     let finalPlan: z.infer<typeof plannerSchema> | undefined;
     let finalSql: string | undefined;
     let lastSuccessfulQuery: { sql: string; result: QueryResult } | undefined;
+    let latestChartArtifact: AgentArtifact | undefined;
 
     for (let step = 1; step <= maxPlannerSteps; step += 1) {
       const planRaw = await measure(`plannerMs_step${step}`, async () =>
@@ -313,6 +334,7 @@ export class AnalyticsAgentRuntime {
         });
         return {
           text,
+          artifacts: latestChartArtifact ? [latestChartArtifact] : undefined,
           debug: {
             plan,
             plannerAttempts,
@@ -401,6 +423,58 @@ export class AnalyticsAgentRuntime {
           );
         } catch {
           // Keep iterating with full failed metadata lookup context.
+        }
+        continue;
+      }
+
+      if (plan.action === "build_chart") {
+        const parsedRequest = chartRequestSchema.safeParse(plan.chartRequest ?? {});
+        if (!parsedRequest.success) {
+          toolCalls.push({
+            tool: "chartjs.build",
+            input: { chartRequest: plan.chartRequest ?? null },
+            status: "error",
+            durationMs: 0,
+            error: "Planner selected build_chart with invalid chartRequest payload."
+          });
+          continue;
+        }
+        if (!lastSuccessfulQuery) {
+          toolCalls.push({
+            tool: "chartjs.build",
+            input: { chartRequest: parsedRequest.data as ChartBuildRequest },
+            status: "error",
+            durationMs: 0,
+            error: "No successful query result available yet. Run query_snowflake first."
+          });
+          continue;
+        }
+        const successfulQuery = lastSuccessfulQuery;
+
+        try {
+          const chartBuild = await runTool(
+            "chartjs.build",
+            {
+              chartRequest: parsedRequest.data as ChartBuildRequest,
+              sourceSql: successfulQuery.sql
+            },
+            async () =>
+              this.chartTool.buildFromQueryResult({
+                request: parsedRequest.data as ChartBuildRequest,
+                result: successfulQuery.result,
+                maxPoints: profile.maxRowsPerQuery
+              }),
+            (result) => result.summary,
+            (result) => ({ config: result.config, summary: result.summary })
+          );
+          latestChartArtifact = {
+            type: "chartjs_config",
+            format: "json",
+            payload: chartBuild.config,
+            summary: chartBuild.summary
+          };
+        } catch {
+          // Keep iterating with full failed chart-build context.
         }
         continue;
       }
@@ -495,6 +569,7 @@ export class AnalyticsAgentRuntime {
       });
       return {
         text,
+        artifacts: latestChartArtifact ? [latestChartArtifact] : undefined,
         debug: {
           plan: finalPlan,
           plannerAttempts,
@@ -515,6 +590,7 @@ export class AnalyticsAgentRuntime {
     });
     return {
       text: fallback,
+      artifacts: latestChartArtifact ? [latestChartArtifact] : undefined,
       debug: {
         plan: finalPlan,
         plannerAttempts,

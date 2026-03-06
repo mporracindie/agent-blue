@@ -1,5 +1,6 @@
 import path from "node:path";
 import { env } from "./config/env.js";
+import { ChartJsTool } from "./adapters/chart/chartJsTool.js";
 import { OpenAiCompatibleProvider } from "./adapters/llm/openAiCompatibleProvider.js";
 import { SqliteConversationStore } from "./adapters/store/sqliteConversationStore.js";
 import { SnowflakeConfig, SnowflakeWarehouseAdapter } from "./adapters/warehouse/snowflakeWarehouse.js";
@@ -17,6 +18,7 @@ export function buildStore(): SqliteConversationStore {
 export function buildRuntime(store: SqliteConversationStore): AnalyticsAgentRuntime {
   const llm = buildLlmProvider();
   const warehouse = buildSnowflakeWarehouse();
+  const chartTool = new ChartJsTool();
   const dbtRepo = new GitDbtRepositoryService(store);
   const sqlGuard = new SqlGuard({
     enforceReadOnly: true,
@@ -24,7 +26,7 @@ export function buildRuntime(store: SqliteConversationStore): AnalyticsAgentRunt
     maxLimit: 2000
   });
 
-  return new AnalyticsAgentRuntime(llm, warehouse, dbtRepo, store, sqlGuard);
+  return new AnalyticsAgentRuntime(llm, warehouse, chartTool, dbtRepo, store, sqlGuard);
 }
 
 export function buildLlmProvider(): OpenAiCompatibleProvider {

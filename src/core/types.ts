@@ -37,7 +37,15 @@ export interface AgentContext {
   llmModel?: string;
 }
 
+export interface AgentArtifact {
+  type: "chartjs_config";
+  format: "json";
+  payload: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+}
+
 export interface AgentResponse {
   text: string;
+  artifacts?: AgentArtifact[];
   debug?: Record<string, unknown>;
 }

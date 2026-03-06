@@ -26,6 +26,9 @@ Core orchestration lives in one place (`AnalyticsAgentRuntime`) and depends on i
   - Executes read-only SQL through an adapter.
   - SQL guard to enforce SELECT/WITH-only and row limits.
   - Agent can inspect warehouse metadata (schemas/tables/columns) when relation names are unclear.
+- Chart tool integration:
+  - Agent can build Chart.js-compatible JSON configs from query results.
+  - Output is channel-agnostic so UI/PNG/ASCII rendering can be added independently.
 - Conversation memory:
   - SQLite store for conversations/messages/profiles/repo config.
 - Agent profile abstraction (“souls”):
@@ -37,6 +40,7 @@ Core orchestration lives in one place (`AnalyticsAgentRuntime`) and depends on i
 src/
   core/                 # interfaces + runtime + sql guard
   adapters/
+    chart/              # chart config builder adapters
     llm/                # model provider adapters
     warehouse/          # snowflake/bigquery adapters
     dbt/                # git dbt repo service

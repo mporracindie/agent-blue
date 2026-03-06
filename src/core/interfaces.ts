@@ -13,6 +13,36 @@ export interface WarehouseAdapter {
   query(sql: string, opts?: { timeoutMs?: number }): Promise<QueryResult>;
 }
 
+export interface ChartBuildRequest {
+  type?: "bar" | "line" | "pie" | "doughnut";
+  title?: string;
+  xKey?: string;
+  yKey?: string;
+  seriesKey?: string;
+  maxPoints?: number;
+}
+
+export interface ChartBuildResult {
+  config: Record<string, unknown>;
+  summary: {
+    type: string;
+    xKey: string | null;
+    yKey: string | null;
+    seriesKey: string | null;
+    labelsCount: number;
+    datasetsCount: number;
+    pointsCount: number;
+  };
+}
+
+export interface ChartTool {
+  buildFromQueryResult(input: {
+    request: ChartBuildRequest;
+    result: QueryResult;
+    maxPoints: number;
+  }): ChartBuildResult;
+}
+
 export interface DbtRepositoryService {
   syncRepo(tenantId: string): Promise<void>;
   listModels(tenantId: string, dbtSubpath?: string): Promise<DbtModelInfo[]>;

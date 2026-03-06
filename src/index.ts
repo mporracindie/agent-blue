@@ -97,10 +97,99 @@ function printVerboseDebug(debug: Record<string, unknown> | undefined): void {
   }
 }
 
+function printArtifacts(artifacts: unknown): void {
+  if (!Array.isArray(artifacts) || artifacts.length === 0) {
+    return;
+  }
+
+  const renderAsciiChart = (payload: unknown): string | null => {
+    const config = payload as {
+      type?: unknown;
+      data?: {
+        labels?: unknown;
+        datasets?: unknown;
+      };
+    };
+    const labels = Array.isArray(config.data?.labels) ? config.data?.labels : [];
+    const datasets = Array.isArray(config.data?.datasets) ? config.data?.datasets : [];
+    if (labels.length === 0 || datasets.length === 0) {
+      return null;
+    }
+
+    const firstDataset = datasets[0] as { label?: unknown; data?: unknown };
+    const points = Array.isArray(firstDataset?.data) ? firstDataset.data : [];
+    if (points.length === 0) {
+      return null;
+    }
+
+    const numericValues = points
+      .map((value) => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return value;
+        }
+        if (typeof value === "string" && value.trim().length > 0) {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }
+        return null;
+      })
+      .filter((value): value is number => value !== null);
+    if (numericValues.length === 0) {
+      return null;
+    }
+
+    const maxValue = Math.max(...numericValues, 1);
+    const barWidth = 24;
+    const labelWidth = 18;
+    const chartLabel = typeof firstDataset.label === "string" ? firstDataset.label : "Series";
+    const chartType = typeof config.type === "string" ? config.type : "chart";
+    const lines: string[] = [];
+    lines.push(`${infoLabel("[chart]")} ${chartType} ${chartLabel}`);
+    for (let i = 0; i < Math.min(labels.length, points.length); i += 1) {
+      const rawLabel = labels[i] === null || labels[i] === undefined ? "(null)" : String(labels[i]);
+      const valueRaw = points[i];
+      const value =
+        typeof valueRaw === "number"
+          ? valueRaw
+          : typeof valueRaw === "string"
+            ? Number(valueRaw)
+            : Number.NaN;
+      const safeValue = Number.isFinite(value) ? value : 0;
+      const blocks = Math.max(0, Math.round((safeValue / maxValue) * barWidth));
+      const bar = "█".repeat(blocks).padEnd(barWidth, " ");
+      const shortLabel = rawLabel.length > labelWidth ? `${rawLabel.slice(0, labelWidth - 1)}…` : rawLabel;
+      lines.push(`  ${shortLabel.padEnd(labelWidth, " ")} | ${bar} ${safeValue}`);
+    }
+    return `${lines.join("\n")}\n`;
+  };
+
+  for (const artifactRaw of artifacts) {
+    const artifact = artifactRaw as {
+      type?: unknown;
+      format?: unknown;
+      summary?: unknown;
+      payload?: unknown;
+    };
+    if (artifact.type !== "chartjs_config") {
+      continue;
+    }
+    output.write(
+      `${infoLabel("[artifact]")} type=chartjs_config format=${String(artifact.format ?? "unknown")} summary=${JSON.stringify(
+        artifact.summary ?? {}
+      )}\n`
+    );
+    const ascii = renderAsciiChart(artifact.payload);
+    if (ascii) {
+      output.write(ascii);
+    }
+  }
+}
+
 const e2eQuestions = [
   "How many users do we have in total?",
   "How many were created last month?",
-  "From those, how many made a transaction since?"
+  "From those, how many made a transaction since?",
+  "Can you provide a bar chart by signup month for the last 6 months and summarize the trend?"
 ];
 
 interface E2eTurnMetrics {
@@ -218,6 +307,7 @@ async function run(): Promise<void> {
         output.write("\n");
       }
       output.write(`${successText(response.text)}\n`);
+      printArtifacts(response.artifacts);
       return;
     }
 
@@ -246,6 +336,7 @@ async function run(): Promise<void> {
           output.write("\n");
         }
         output.write(`${successText(response.text)}\n\n`);
+        printArtifacts(response.artifacts);
       } catch (error) {
         output.write(`\n${errorText(`Error: ${(error as Error).message}`)}\n\n`);
       }
@@ -293,6 +384,7 @@ async function run(): Promise<void> {
             modelMetrics.push(metrics);
 
             output.write(`${successText("A:")} ${response.text}\n`);
+            printArtifacts(response.artifacts);
             output.write(
               `${infoLabel("[metrics]")} attempts=${metrics.plannerAttempts} totalMs=${
                 metrics.totalMs ?? "n/a"
